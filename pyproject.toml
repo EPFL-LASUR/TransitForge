@@ -7,7 +7,16 @@ authors = [
     { name = "karlex27", email = "126259759+karlex27@users.noreply.github.com" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "dataclasses>=0.8",
+    "extractosm",
+    "folium>=0.20.0",
+    "matplotlib>=3.11.2",
+    "osmium>=4.3.1",
+    "pathlib>=1.0.1",
+    "shapely>=2.1.2",
+    "typing>=3.10.0.0",
+]
 
 [project.scripts]
 transitforge = "transitforge:main"
@@ -15,3 +24,6 @@ transitforge = "transitforge:main"
 [build-system]
 requires = ["uv_build>=0.12.6,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.uv.sources]
+extractosm = { git = "https://github.com/EPFL-ENAC/extractosm.git" }
