@@ -224,6 +224,57 @@ m = plot_network(network, mode="dynamic")
 m.save(path_to_html)
 ```
 
+## Testing
+
+TransitForge uses `pytest` for automated testing.
+
+The test suite is located in the `tests/` directory.
+
+Run the complete test suite with:
+
+```bash
+uv run pytest
+```
+
+For more detailed output:
+
+```bash
+uv run pytest -v
+```
+
+### What is tested
+
+The current test suite covers the main functionality of the package, including:
+
+* `TransitRouteBuilder`
+
+  * default and custom route types
+  * platform role handling
+  * route geometry construction
+  * connecting and orienting OSM ways
+  * deduplicating geometry points
+  * handling missing ways
+  * removing small repeated loops
+  * complete builder orchestration
+
+* `TransitRouteNetwork`
+
+  * route indexing by reference
+  * nearest-stop matching
+  * stop-sequence matching
+  * route direction handling
+  * GTFS route-type compatibility
+  * route matching by stops
+  * geometry-based route matching fallback
+  * `LineString` and `MultiLineString` geometries
+  * forward and reverse geometry extraction
+  * public latitude/longitude geometry output
+  * error handling when no route can be matched
+  * saving and loading networks
+
+The tests use small in-memory fixtures rather than requiring a real OpenStreetMap PBF file. Collector and `extractosm` operations are mocked where appropriate, which keeps the test suite fast and deterministic.
+
+
 ## Public API
 
 The main public classes and methods are:
