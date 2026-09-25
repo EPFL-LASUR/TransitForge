@@ -26,4 +26,4 @@ requires = ["uv_build>=0.12.6,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
-extractosm = { git = "https://github.com/EPFL-ENAC/extractosm.git" }
+extractosm = { git = "https://github.com/EPFL-ENAC/extractosm", rev = "v0.1.3" }

@@ -236,7 +236,7 @@ wheels = [
 [[package]]
 name = "extractosm"
 version = "0.1.3"
-source = { git = "https://github.com/EPFL-ENAC/extractosm.git#22388e1956d7ad311550198d404ce5ea0e89fb44" }
+source = { git = "https://github.com/EPFL-ENAC/extractosm?rev=v0.1.3#aadb692e4d697d9ce65f2056beacc1aeb7fa5457" }
 dependencies = [
     { name = "geopandas" },
     { name = "osmium" },
@@ -1017,7 +1017,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "dataclasses", specifier = ">=0.8" },
-    { name = "extractosm", git = "https://github.com/EPFL-ENAC/extractosm.git" },
+    { name = "extractosm", git = "https://github.com/EPFL-ENAC/extractosm?rev=v0.1.3" },
     { name = "folium", specifier = ">=0.20.0" },
     { name = "matplotlib", specifier = ">=3.11.2" },
     { name = "osmium", specifier = ">=4.3.1" },
