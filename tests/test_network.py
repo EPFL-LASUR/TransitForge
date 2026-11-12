@@ -1,5 +1,7 @@
 import pickle
 from pathlib import Path
+from dataclasses import replace
+from functools import reduce
 
 import numpy as np
 import pytest
@@ -1892,6 +1894,506 @@ def test_stop_sequence_raises_descriptive_error_when_nothing_matches():
             BUS_LEG,
             [(47.0, 8.0), (47.05, 8.05), (47.1, 8.1)],
         )
+
+# ----------------------------------------------------------------------
+# Merging
+# ----------------------------------------------------------------------
+
+LONG_COORDS = A_COORDS + B_COORDS  # 6 stops, geometry spans 7.0 -> 7.2
+
+
+def network_of(*routes):
+    return TransitRouteNetwork({r.relation_id: r for r in routes})
+
+
+def with_geometry(route, geometry):
+    return replace(route, geometry=geometry)
+
+
+# -- completeness ranking ------------------------------------------------
+
+
+def test_completeness_counts_stops_and_measures_geometry():
+    n_stops, length = TransitRouteNetwork._completeness(
+        make_route(1, A_COORDS)
+    )
+
+    assert n_stops == 3
+    assert length == pytest.approx(0.1)
+
+
+def test_completeness_without_geometry_has_zero_length():
+    stops = [TransitStop(1, 46.0, 7.0, "A")]
+    no_geom = TransitRoute(
+        relation_id=1, route_type="bus", ref="12", stops=stops
+    )
+    empty_geom = replace(no_geom, geometry=LineString())
+
+    assert TransitRouteNetwork._completeness(no_geom) == (1, 0.0)
+    assert TransitRouteNetwork._completeness(empty_geom) == (1, 0.0)
+
+
+def test_completeness_prefers_stops_over_geometry_length():
+    many_stops = make_route(1, LONG_COORDS)
+    long_line = with_geometry(
+        make_route(1, A_COORDS), LineString([(0.0, 0.0), (10.0, 10.0)])
+    )
+
+    assert TransitRouteNetwork._completeness(
+        many_stops
+    ) > TransitRouteNetwork._completeness(long_line)
+
+
+# -- disjoint networks / basic behavior ----------------------------------
+
+
+def test_merge_disjoint_networks_keeps_all_routes(capsys):
+    a = make_route(1, A_COORDS)
+    b = make_route(2, B_COORDS)
+    net_a, net_b = network_of(a), network_of(b)
+
+    merged = net_a.merge(net_b)  # default arguments
+
+    assert isinstance(merged, TransitRouteNetwork)
+    assert merged is not net_a and merged is not net_b
+    assert list(merged.routes) == [1, 2]  # self first, then other
+    # Route objects are shared, not copied.
+    assert merged.routes[1] is a
+    assert merged.routes[2] is b
+
+
+def test_merge_does_not_modify_inputs():
+    mine = make_route(1, A_COORDS, name="mine")
+    theirs = make_route(1, B_COORDS, name="theirs")
+    extra = make_route(2, B_COORDS)
+    net_a, net_b = network_of(mine), network_of(theirs, extra)
+
+    merged = net_a.merge(net_b, on_conflict="keep_other", verbose=False)
+
+    assert merged.routes[1] is theirs
+    assert list(net_a.routes) == [1] and net_a.routes[1] is mine
+    assert list(net_b.routes) == [1, 2]
+    assert net_a.by_ref["12"] == [1]
+
+
+def test_merge_result_has_its_own_routes_dict():
+    net_a = network_of(make_route(1, A_COORDS))
+    net_b = network_of(make_route(2, B_COORDS))
+
+    merged = net_a.merge(net_b, verbose=False)
+    merged.routes[99] = make_route(99, A_COORDS)
+
+    assert 99 not in net_a.routes
+    assert 99 not in net_b.routes
+
+
+def test_merge_with_empty_networks():
+    a = make_route(1, A_COORDS)
+
+    assert TransitRouteNetwork({}).merge(
+        TransitRouteNetwork({}), verbose=False
+    ).routes == {}
+    assert network_of(a).merge(
+        TransitRouteNetwork({}), verbose=False
+    ).routes == {1: a}
+    assert TransitRouteNetwork({}).merge(
+        network_of(a), verbose=False
+    ).routes == {1: a}
+
+
+def test_merge_result_indexes_routes_from_both_networks():
+    net_a = network_of(make_route(1, A_COORDS))
+    net_b = network_of(make_route(2, B_COORDS))
+
+    merged = net_a.merge(net_b, verbose=False)
+
+    assert merged.by_ref["12"] == [1, 2]
+    assert merged._bbox[1] == pytest.approx((46.0, 46.0, 7.0, 7.1))
+    assert merged._bbox[2] == pytest.approx((46.0, 46.0, 7.1005, 7.2))
+
+
+def test_merge_result_starts_with_empty_caches_and_leaves_sources_warm():
+    net_a = network_of(make_route(1, A_COORDS))
+    net_b = network_of(make_route(2, B_COORDS))
+    net_a._compatible_candidates(BUS_LEG)  # warm a cache on the source
+
+    merged = net_a.merge(net_b, verbose=False)
+
+    assert merged._arrays == {}
+    assert merged._cand_cache == {}
+    assert merged._type_routes == {}
+    assert merged._type_bbox == {}
+    assert net_a._cand_cache  # source untouched
+
+
+def test_merge_keeps_route_without_stops_or_ref():
+    stubless = TransitRoute(relation_id=3, route_type="bus")
+    merged = network_of(make_route(1, A_COORDS)).merge(
+        network_of(stubless), verbose=False
+    )
+
+    assert merged.routes[3] is stubless
+    assert 3 not in merged._bbox
+    assert merged.by_ref["12"] == [1]
+
+
+# -- shared relations ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "policy", ["most_complete", "keep_self", "keep_other", "raise"]
+)
+def test_merge_same_route_object_is_not_a_conflict(policy, capsys):
+    shared = make_route(1, A_COORDS)
+    extra = make_route(2, B_COORDS)
+
+    merged = network_of(shared).merge(
+        network_of(shared, extra), on_conflict=policy
+    )
+
+    assert merged.routes == {1: shared, 2: extra}
+    assert "(1 new, 0 shared, 0 shared replaced)" in capsys.readouterr().out
+
+
+def test_merge_network_with_itself_under_raise():
+    network = network_of(make_route(1, A_COORDS), make_route(2, B_COORDS))
+
+    merged = network.merge(network, on_conflict="raise", verbose=False)
+
+    assert merged.routes == network.routes
+    assert merged.routes is not network.routes
+
+
+def test_merge_most_complete_is_the_default():
+    small = make_route(1, A_COORDS, name="small")
+    big = make_route(1, LONG_COORDS, name="big")
+
+    assert network_of(small).merge(
+        network_of(big), verbose=False
+    ).routes[1] is big
+
+
+def test_merge_most_complete_takes_other_when_it_has_more_stops():
+    small = make_route(1, A_COORDS, name="small")
+    big = make_route(1, LONG_COORDS, name="big")
+
+    merged = network_of(small).merge(
+        network_of(big), on_conflict="most_complete", verbose=False
+    )
+
+    assert merged.routes[1] is big
+
+
+def test_merge_most_complete_keeps_self_when_it_has_more_stops():
+    small = make_route(1, A_COORDS, name="small")
+    big = make_route(1, LONG_COORDS, name="big")
+
+    merged = network_of(big).merge(
+        network_of(small), on_conflict="most_complete", verbose=False
+    )
+
+    assert merged.routes[1] is big
+
+
+def test_merge_most_complete_breaks_stop_ties_with_geometry_length():
+    short_line = make_route(1, A_COORDS, name="short")
+    long_line = with_geometry(
+        make_route(1, A_COORDS, name="long"),
+        LineString([(7.0, 46.0), (7.0, 47.0)]),
+    )
+
+    assert network_of(short_line).merge(
+        network_of(long_line), verbose=False
+    ).routes[1] is long_line
+    assert network_of(long_line).merge(
+        network_of(short_line), verbose=False
+    ).routes[1] is long_line
+
+
+def test_merge_most_complete_prefers_route_with_geometry_over_none():
+    no_geom = with_geometry(make_route(1, A_COORDS, name="none"), None)
+    with_geom = make_route(1, A_COORDS, name="geom")
+
+    assert network_of(no_geom).merge(
+        network_of(with_geom), verbose=False
+    ).routes[1] is with_geom
+    assert network_of(with_geom).merge(
+        network_of(no_geom), verbose=False
+    ).routes[1] is with_geom
+
+
+def test_merge_most_complete_prefers_route_with_stops_over_stubless():
+    stubless = TransitRoute(relation_id=1, route_type="bus", ref="12")
+    full = make_route(1, A_COORDS)
+
+    assert network_of(stubless).merge(
+        network_of(full), verbose=False
+    ).routes[1] is full
+    assert network_of(full).merge(
+        network_of(stubless), verbose=False
+    ).routes[1] is full
+
+
+def test_merge_most_complete_full_tie_keeps_self():
+    mine = make_route(1, A_COORDS, name="mine")
+    theirs = make_route(1, A_COORDS, name="theirs")
+
+    merged = network_of(mine).merge(network_of(theirs), verbose=False)
+
+    assert merged.routes[1] is mine
+
+
+def test_merge_keep_self_ignores_a_more_complete_other():
+    mine = make_route(1, A_COORDS, name="mine")
+    theirs = make_route(1, LONG_COORDS, name="theirs")
+
+    merged = network_of(mine).merge(
+        network_of(theirs), on_conflict="keep_self", verbose=False
+    )
+
+    assert merged.routes[1] is mine
+
+
+def test_merge_keep_self_still_adds_new_relations():
+    mine = make_route(1, A_COORDS)
+    new = make_route(2, B_COORDS)
+
+    merged = network_of(mine).merge(
+        network_of(make_route(1, LONG_COORDS), new),
+        on_conflict="keep_self",
+        verbose=False,
+    )
+
+    assert merged.routes[1] is mine
+    assert merged.routes[2] is new
+
+
+def test_merge_keep_other_ignores_a_less_complete_other():
+    mine = make_route(1, LONG_COORDS, name="mine")
+    theirs = make_route(1, A_COORDS, name="theirs")
+
+    merged = network_of(mine).merge(
+        network_of(theirs), on_conflict="keep_other", verbose=False
+    )
+
+    assert merged.routes[1] is theirs
+
+
+def test_merge_raise_reports_the_relation_id():
+    net_a = network_of(make_route(1, A_COORDS), make_route(7, A_COORDS))
+    net_b = network_of(make_route(7, B_COORDS))
+
+    with pytest.raises(ValueError, match="Relation 7 exists in both"):
+        net_a.merge(net_b, on_conflict="raise")
+
+
+def test_merge_raise_does_not_modify_self_when_inplace():
+    mine = make_route(1, A_COORDS)
+    network = network_of(mine)
+    # Route 2 is processed (added) before the conflict on route 1.
+    other = TransitRouteNetwork(
+        {2: make_route(2, B_COORDS), 1: make_route(1, LONG_COORDS)}
+    )
+
+    with pytest.raises(ValueError):
+        network.merge(other, on_conflict="raise", inplace=True)
+
+    assert list(network.routes) == [1]
+    assert network.routes[1] is mine
+    assert network.by_ref["12"] == [1]
+
+
+@pytest.mark.parametrize("policy", ["newest", "MOST_COMPLETE", "", None])
+def test_merge_rejects_unknown_policy(policy):
+    net_a = network_of(make_route(1, A_COORDS))
+    net_b = network_of(make_route(2, B_COORDS))  # no conflict needed
+
+    with pytest.raises(ValueError, match="Unknown on_conflict policy"):
+        net_a.merge(net_b, on_conflict=policy)
+
+
+def test_merge_unknown_policy_does_not_modify_self_when_inplace():
+    network = network_of(make_route(1, A_COORDS))
+
+    with pytest.raises(ValueError):
+        network.merge(
+            network_of(make_route(2, B_COORDS)),
+            on_conflict="bogus",
+            inplace=True,
+        )
+
+    assert list(network.routes) == [1]
+
+
+# -- inplace ---------------------------------------------------------------
+
+
+def test_merge_inplace_returns_self_and_adds_routes():
+    a = make_route(1, A_COORDS)
+    b = make_route(2, B_COORDS)
+    network, other = network_of(a), network_of(b)
+
+    result = network.merge(other, inplace=True, verbose=False)
+
+    assert result is network
+    assert list(network.routes) == [1, 2]
+    assert network.by_ref["12"] == [1, 2]
+    assert 2 in network._bbox
+
+
+def test_merge_inplace_does_not_alias_or_modify_other():
+    other = network_of(make_route(2, B_COORDS))
+    network = network_of(make_route(1, A_COORDS))
+
+    network.merge(other, inplace=True, verbose=False)
+    network.routes[99] = make_route(99, A_COORDS)
+
+    assert network.routes is not other.routes
+    assert list(other.routes) == [2]
+
+
+def test_merge_inplace_rebuilds_indexes_for_replaced_route():
+    old = make_route(1, A_COORDS, ref="12")
+    new = make_route(1, LONG_COORDS, ref="34")
+    network = network_of(old)
+
+    network.merge(
+        network_of(new), on_conflict="keep_other", inplace=True, verbose=False
+    )
+
+    assert network.routes[1] is new
+    assert "12" not in network.by_ref
+    assert network.by_ref["34"] == [1]
+    assert network._bbox[1] == pytest.approx((46.0, 46.0, 7.0, 7.2))
+
+
+def test_merge_inplace_clears_stale_caches():
+    old = make_route(1, A_COORDS)
+    new = make_route(1, LONG_COORDS)
+    network = network_of(old)
+
+    # Warm every lazy cache.
+    network._route_arrays(old)
+    network._compatible_candidates(BUS_LEG)
+    network._compute_compatible_candidates("999", "BUS")
+    network._typed_bbox_index("BUS")
+    assert network._arrays and network._cand_cache
+    assert network._type_routes and network._type_bbox
+
+    network.merge(
+        network_of(new), on_conflict="keep_other", inplace=True, verbose=False
+    )
+
+    assert network._arrays == {}
+    assert network._cand_cache == {}
+    assert network._type_routes == {}
+    assert network._type_bbox == {}
+
+    # `_arrays` is keyed by relation id: it must reflect the NEW route.
+    lat_r, _, _ = network._route_arrays(new)
+    assert lat_r.shape == (6,)
+
+    ids, bb = network._typed_bbox_index("BUS")
+    assert ids == [1]
+    assert bb[0] == pytest.approx([46.0, 46.0, 7.0, 7.2])
+
+
+# -- verbose summary -------------------------------------------------------
+
+
+def test_merge_prints_summary_counts(capsys):
+    net_a = network_of(
+        make_route(1, A_COORDS), make_route(2, B_COORDS)
+    )
+    net_b = network_of(
+        make_route(1, LONG_COORDS), make_route(3, B_COORDS)
+    )
+
+    net_a.merge(net_b)
+
+    out = capsys.readouterr().out
+
+    assert (
+        "Merged networks: 2 + 2 -> 3 routes "
+        "(1 new, 1 shared, 1 shared replaced)"
+    ) in out
+
+
+def test_merge_summary_counts_unreplaced_conflicts(capsys):
+    net_a = network_of(make_route(1, A_COORDS))
+    net_b = network_of(make_route(1, LONG_COORDS))
+
+    net_a.merge(net_b, on_conflict="keep_self")
+
+    assert (
+        "(0 new, 1 shared, 0 shared replaced)" in capsys.readouterr().out
+    )
+
+
+def test_merge_verbose_false_is_silent(capsys):
+    network_of(make_route(1, A_COORDS)).merge(
+        network_of(make_route(1, LONG_COORDS)), verbose=False
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+# -- the merged network is usable -------------------------------------------
+
+
+def test_merged_network_matches_legs_from_either_source():
+    net_a = network_of(make_route(1, A_COORDS))
+    net_b = network_of(make_route(2, B_COORDS))
+    leg_b = make_leg(B_COORDS[0], B_COORDS[-1])
+
+    # Alone, the first network cannot serve a leg on the second one.
+    assert net_a.find_route_for_leg(leg_b) is None
+    with pytest.raises(ValueError):
+        net_a.get_geometry_for_leg(leg_b)
+
+    merged = net_a.merge(net_b, verbose=False)
+
+    assert merged.find_route_for_leg(leg_b).relation_id == 2
+
+    geometry = merged.get_geometry_for_leg(leg_b)
+    assert_coords(geometry[0], list(B_COORDS[0]))
+    assert_coords(geometry[-1], list(B_COORDS[-1]))
+
+    # ... and the legs of the first network still work.
+    assert merged.find_route_for_leg(
+        make_leg(A_COORDS[0], A_COORDS[-1])
+    ).relation_id == 1
+
+
+def test_merge_can_be_chained_with_reduce():
+    nets = [
+        network_of(make_route(1, A_COORDS)),
+        network_of(make_route(2, B_COORDS)),
+        network_of(make_route(3, LONG_COORDS, ref="34")),
+    ]
+
+    merged = reduce(lambda x, y: x.merge(y, verbose=False), nets)
+
+    assert set(merged.routes) == {1, 2, 3}
+    assert merged.by_ref["12"] == [1, 2]
+    assert merged.by_ref["34"] == [3]
+
+
+def test_merged_network_survives_save_and_load(tmp_path):
+    merged = network_of(make_route(1, A_COORDS)).merge(
+        network_of(make_route(2, B_COORDS)), verbose=False
+    )
+
+    path = tmp_path / "merged.pkl"
+    merged.save(path)
+
+    loaded = TransitRouteNetwork.load(path)
+
+    assert set(loaded.routes) == {1, 2}
+    assert loaded.by_ref["12"] == [1, 2]
+    assert loaded.find_route_for_leg(
+        make_leg(B_COORDS[0], B_COORDS[-1])
+    ).relation_id == 2
 
 
 # ----------------------------------------------------------------------
