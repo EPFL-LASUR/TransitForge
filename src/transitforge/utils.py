@@ -4,41 +4,43 @@ from shapely.geometry import LineString, MultiLineString
 import re
 
 
+import re
+from typing import Any
+
+import numpy as np
+from shapely.geometry import LineString, MultiLineString
+
+_R = 6_371_000.0
+
+
 def _haversine(
-    lat1: float,
-    lon1: float,
-    lat2: float,
-    lon2: float,
-) -> float:
+    lat1,
+    lon1,
+    lat2,
+    lon2,
+    radians: bool = False,
+):
+    """
+    Great-circle distance in metres.
 
+    Works on scalars and on numpy arrays (broadcasting). If radians is
+    True the inputs are already in radians.
+    """
 
-    R = 6_371_000.0
-
-    lat1 = radians(lat1)
-    lon1 = radians(lon1)
-
-    lat2 = radians(lat2)
-    lon2 = radians(lon2)
-
+    if not radians:
+        lat1, lon1, lat2, lon2 = (
+            np.deg2rad(v) for v in (lat1, lon1, lat2, lon2)
+        )
 
     dlat = lat2 - lat1
     dlon = lon2 - lon1
 
-
     a = (
-        sin(dlat / 2) ** 2
-        +
-        cos(lat1)
-        * cos(lat2)
-        * sin(dlon / 2) ** 2
+        np.sin(dlat / 2) ** 2
+        + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
     )
 
-
-    return (
-        2
-        * R
-        * asin(sqrt(a))
-    )
+    return 2 * _R * np.arcsin(np.sqrt(np.minimum(a, 1.0)))
 
 
 def _point_to_route_distance_m(
