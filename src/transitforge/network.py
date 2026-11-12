@@ -1589,3 +1589,105 @@ class TransitRouteNetwork:
             raise ValueError(self._describe_no_match(leg, max_stop_distance_m))
 
         return self._stitch(route, stops)
+
+        # ------------------------------------------------------------------
+    # Merging
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _completeness(route: TransitRoute) -> tuple[int, float]:
+        """
+        Rank a route variant by how much of it is present: number of
+        stops first, then geometry length. Used to pick between two
+        versions of the same relation (e.g. clipped by different extracts).
+        """
+
+        geom = route.geometry
+        length = 0.0 if geom is None or geom.is_empty else float(geom.length)
+
+        return len(route.stops), length
+
+    def merge(
+        self,
+        other: "TransitRouteNetwork",
+        on_conflict: str = "most_complete",
+        inplace: bool = False,
+        verbose: bool = True,
+    ) -> "TransitRouteNetwork":
+        """
+        Merge another network into this one.
+
+        Routes are keyed by OSM relation id. Relations present in only
+        one network are always kept. For a relation present in both,
+        `on_conflict` decides:
+
+            "most_complete" : keep the version with more stops (ties
+                              broken by longer geometry). Default.
+            "keep_self"     : keep the version already in this network.
+            "keep_other"    : take the version from `other`.
+            "raise"         : raise ValueError.
+
+        Args:
+            other: network to merge in (not modified).
+            on_conflict: conflict policy, see above.
+            inplace: modify and return self instead of returning a new
+                network. Indexes and caches are rebuilt either way.
+            verbose: print a short summary.
+
+        Note: route objects are shared, not copied, between the inputs
+        and the result.
+        """
+
+        if on_conflict not in {
+            "most_complete",
+            "keep_self",
+            "keep_other",
+            "raise",
+        }:
+            raise ValueError(f"Unknown on_conflict policy: {on_conflict!r}")
+
+        merged = dict(self.routes)
+
+        n_added = n_conflicts = n_replaced = 0
+
+        for route_id, route in other.routes.items():
+
+            current = merged.get(route_id)
+
+            if current is None:
+                merged[route_id] = route
+                n_added += 1
+                continue
+
+            if current is route:
+                continue
+
+            n_conflicts += 1
+
+            if on_conflict == "raise":
+                raise ValueError(f"Relation {route_id} exists in both networks")
+
+            if on_conflict == "keep_self":
+                continue
+
+            if (
+                on_conflict == "keep_other"
+                or self._completeness(route) > self._completeness(current)
+            ):
+                merged[route_id] = route
+                n_replaced += 1
+
+        if verbose:
+            print(
+                f"Merged networks: {len(self.routes)} + {len(other.routes)} "
+                f"-> {len(merged)} routes "
+                f"({n_added} new, {n_conflicts} shared, "
+                f"{n_replaced} shared replaced)"
+            )
+
+        if inplace:
+            self.routes = merged
+            self._build_indexes()  # also clears the lazy caches
+            return self
+
+        return TransitRouteNetwork(merged)
