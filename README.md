@@ -97,6 +97,60 @@ The parent directory is created automatically when saving.
 
 > **Note:** `pickle` should only be loaded from trusted sources.
 
+## Merging networks
+
+Several networks can be combined into one, for example to complement a detailed regional extract with a national one, or to cover a border region with extracts from two countries:
+
+```python
+from transitforge import TransitRouteNetwork
+
+vaud = TransitRouteNetwork.load("vaud.pkl")
+valais = TransitRouteNetwork.load("valais.pkl")
+
+network = vaud.merge(valais)
+network.save("merged.pkl")
+```
+
+Routes are identified by their OSM relation id. Relations that exist in only one of the two networks are always kept. A relation that exists in both is a *conflict*, which typically happens for lines crossing the boundary of an extract, since each extract clips them differently. TransitForge never combines the stops or geometry of two versions of the same relation: it keeps exactly one version, chosen by the `on_conflict` policy.
+
+| `on_conflict` | Behavior |
+|---|---|
+| `"most_complete"` (default) | Keep the version with more stops. Ties are broken by the longer geometry. |
+| `"keep_self"` | Keep the version already in the network `merge` is called on. |
+| `"keep_other"` | Take the version from the network passed as argument. |
+| `"raise"` | Raise a `ValueError` on the first shared relation. |
+
+A relation is only a conflict if the two networks hold different route objects for it. When both networks reference the same object, the route is kept silently under every policy, including `"raise"`. Invalid `on_conflict` values raise a `ValueError` before anything is merged, and if `merge` fails (invalid policy or `"raise"` on a shared relation), the calling network is left unmodified, even with `inplace=True`.
+
+```python
+# Prefer the regional extract wherever both networks contain a relation
+network = vaud.merge(valais, on_conflict="keep_self")
+```
+
+By default `merge` returns a new network and leaves both inputs unchanged. With `inplace=True`, the calling network is modified and returned, which avoids holding an extra copy of the routes dictionary when merging large networks:
+
+```python
+vaud.merge(valais, inplace=True)
+```
+
+More than two networks can be merged by chaining calls:
+
+```python
+from functools import reduce
+
+network = reduce(lambda a, b: a.merge(b), [net_ch, net_fr, net_it])
+```
+
+Unless `verbose=False` is passed, a one-line summary is printed, for example:
+
+    Merged networks: 2 + 2 -> 3 routes (1 new, 1 shared, 1 shared replaced)
+
+> **Notes:**
+>
+> * Route objects are shared, not copied, between the input networks and the result.
+> * The lookup indexes and caches of the merged network are rebuilt automatically.
+> * The networks should have been built with a compatible version of TransitForge. If a pickle was created with an older version of the package, rebuild it or wrap its routes with `TransitRouteNetwork(old.routes)` before merging.
+
 ## Route matching
 
 `TransitRouteNetwork` can match routing legs to OSM transit routes and reconstruct their geometry.
@@ -379,6 +433,15 @@ The test suite covers the main functionality of the package, including:
   - stop-sequence diagnostics;
   - error handling when no route can be matched;
   - saving and loading networks.
+  - merging networks:
+    - disjoint networks, empty networks, and routes without stops or ref;
+    - the `most_complete` ranking (stop count first, then geometry length, ties keep the calling network);
+    - the `keep_self`, `keep_other` and `raise` policies, and rejection of unknown policies;
+    - identical route objects in both networks not counting as conflicts;
+    - inputs left unmodified, including when `raise` fails midway with `inplace=True`;
+    - `inplace=True` rebuilding indexes and clearing stale caches;
+    - the printed summary and `verbose=False`;
+    - matching legs on a merged network, chaining several merges, and saving/loading a merged network;
 
 The tests use small in-memory fixtures rather than requiring a real OpenStreetMap PBF file. Collector and `extractosm` operations are mocked where appropriate, which keeps the test suite fast and deterministic.
 
@@ -398,5 +461,6 @@ The main public classes and methods are:
 | `network.diagnose_stop_sequence(leg, stops)` | Diagnose why a complete stop sequence could not be matched. |
 | `network.find_route_for_leg(leg)` | Find an OSM route matching a routing leg. |
 | `network.geometry_between(route, start, end)` | Extract geometry between two coordinates along an OSM route. |
+| `network.merge(other, on_conflict="most_complete", inplace=False)` | Merge another network into this one, resolving relations present in both. |
 
 Methods prefixed with `_` are internal implementation details and are not intended to be part of the public API.
